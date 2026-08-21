@@ -113,6 +113,49 @@ def make_sft_collate_fn(tokenizer: PreTrainedTokenizerBase, max_length: int = 51
     return collate_fn
 
 
+def make_dpo_collate_fn(tokenizer: PreTrainedTokenizerBase, max_length: int = 512):
+    """Collate for DPO: tokenizes (prompt + chosen) and (prompt + rejected) as
+    two sequences, each with prompt tokens masked to -100 in their `labels` —
+    reuses the same prompt-masking convention as `make_sft_collate_fn` so the
+    policy/reference log-prob sums are computed over response tokens only."""
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    def _encode(pairs: list[PreferencePair], field: str) -> dict[str, torch.Tensor]:
+        texts = [p.prompt + getattr(p, field) for p in pairs]
+        prompt_lens = [
+            len(tokenizer(p.prompt, truncation=True, max_length=max_length)["input_ids"])
+            for p in pairs
+        ]
+        enc = tokenizer(
+            texts, padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+        )
+        input_ids = enc["input_ids"]
+        attention_mask = enc["attention_mask"]
+
+        labels = input_ids.clone()
+        for i, prompt_len in enumerate(prompt_lens):
+            labels[i, :prompt_len] = -100
+        labels[attention_mask == 0] = -100
+
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+    def collate_fn(batch: list[PreferencePair]) -> dict[str, torch.Tensor]:
+        chosen = _encode(batch, "chosen")
+        rejected = _encode(batch, "rejected")
+        return {
+            "chosen_input_ids": chosen["input_ids"],
+            "chosen_attention_mask": chosen["attention_mask"],
+            "chosen_labels": chosen["labels"],
+            "rejected_input_ids": rejected["input_ids"],
+            "rejected_attention_mask": rejected["attention_mask"],
+            "rejected_labels": rejected["labels"],
+        }
+
+    return collate_fn
+
+
 def make_collate_fn(tokenizer: PreTrainedTokenizerBase, max_length: int = 512):
     """Builds a collate_fn that tokenizes (prompt + response) for chosen/rejected
     with the given tokenizer. Same dataset works for any tokenizer this way, so

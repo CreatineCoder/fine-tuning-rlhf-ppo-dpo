@@ -20,6 +20,7 @@ dependencies = [
     "pyyaml",
     "typer>=0.12",
     "tqdm",
+    "sentencepiece",
 ]
 
 [project.optional-dependencies]

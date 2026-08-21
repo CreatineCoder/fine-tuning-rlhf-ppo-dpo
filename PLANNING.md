@@ -10,8 +10,9 @@ estimated:
    modeling, PPO and DPO losses instead of wrapping `trl`.
 2. Built PPO with a clipped surrogate objective, GAE advantages and KL penalty,
    converging to **[KL]** against the frozen reference model.
-3. Split trainable actor-critic from frozen reference-reward across two NCCL groups,
-   measuring **[X]%** VRAM and **[Y]%** comms reduction.
+3. Split trainable actor-critic from frozen reference-reward across two NCCL process
+   groups, measuring **[X]%** VRAM reduction and **[Y]%** fewer bytes exchanged
+   across the group boundary vs. a single merged group.
 4. Ran a distilgpt2 and bert-tiny toy pipeline end-to-end on one GPU, with the reward
    model ranking **[X]%** of held-out pairs correctly.
 
@@ -23,17 +24,25 @@ Reference implementation for architectural ideas (not copied): `../Improving-LLM
   currently supports (`cuda.is_available()` is `False`). Used **CPU-only, code +
   correctness only** — every engine (SFT/reward/PPO/DPO) is written and unit-tested
   here against tiny synthetic data/models, never run as a real training job.
-- **Training machine:** separate machine with an RTX 5080, used later to actually run
-  the toy pipeline end-to-end and produce the real numbers for bullets 1, 2, 4.
-- **Bullet 3 (multi-GPU NCCL topology):** a single GPU — even the 5080 — cannot be
-  split into two independent devices for this (no MIG on consumer RTX cards; multiple
-  processes on one GPU still share one VRAM pool/bus, so any measurement that way is
-  a simulation, not a real result). Code is written and correctness-tested via
-  single-GPU multi-process simulation throughout Phases 1-6. The final VRAM/comms
-  numbers require a **second, separate GPU** alongside the 5080 (or a rented 2-GPU
-  cloud instance) and are captured in **Phase 7**. Until that run happens, this
-  bullet stays labeled "designed + simulated, hardware-pending" — never a fabricated
-  number.
+- **Training machine:** separate machine with an RTX 5080 (16GB VRAM), used later to
+  actually run the toy pipeline end-to-end and produce the real numbers for bullets
+  1, 2, 4.
+- **Bullet 3 (multi-GPU NCCL topology) — no rental needed:** two processes run on the
+  *same* RTX 5080, each capped to its own VRAM budget via
+  `torch.cuda.set_per_process_memory_fraction()` (e.g. ~4-6GB each). This is enough
+  to get two of the three numbers honestly:
+  - **VRAM reduction is real** even on one physical GPU — it's a per-process memory
+    footprint measurement (Group A loads only actor+critic; Group B loads only
+    frozen reference+reward), not something that requires separate devices to be
+    true.
+  - **Bytes exchanged across the group boundary is real** — a genuine count of what
+    crosses from Group A to Group B (rollout tokens, log-probs, reward scalars),
+    regardless of physical topology.
+  - **What is *not* claimed:** wall-clock/bandwidth savings from avoiding real
+    PCIe/NVLink traffic — two processes on one GPU share the same on-die path, so
+    there's no real interconnect cost being avoided. The project summary's bullet 3
+    is worded around "bytes exchanged," not communication time, specifically so it
+    stays honest under this single-GPU setup. No cloud rental phase is needed.
 
 ## Models & data
 
@@ -105,89 +114,147 @@ machine (GTX 1650, CPU-only torch) is code + correctness only.
 
 ---
 
-## Phase 3 — Reward model (Bradley-Terry, hand-written)
+## Phase 3 — Reward model (Bradley-Terry, hand-written) ✅ COMPLETE (dev/correctness — real run pending on RTX 5080)
 
-- `src/rlhf_scratch/models/reward_model.py`: bert-tiny + scalar head.
-- `src/rlhf_scratch/training/reward.py`: Bradley-Terry pairwise loss
-  `-log(sigmoid(r_chosen - r_rejected))`, written by hand (no `trl` reward trainer).
-- Evaluation: accuracy = fraction of held-out pairs where `r_chosen > r_rejected`.
-  This produces the real **[X]%** for bullet 4.
+- [x] `src/rlhf_scratch/models/reward_model.py`: `RewardModel` — bert-tiny encoder
+  + a linear scalar head over the last real token's hidden state.
+- [x] `src/rlhf_scratch/training/reward.py`: `bradley_terry_loss()` —
+  `-log(sigmoid(r_chosen - r_rejected))`, hand-written (no `trl` reward trainer) —
+  plus `RewardTrainer` (train loop with AMP/grad-accum/clipping, and
+  `evaluate_ranking_accuracy()`: fraction of held-out pairs where
+  `r_chosen > r_rejected`, the real number behind bullet 4's **[X]%**).
+- [x] `scripts/train_reward.py` CLI entrypoint — trains on toy/full HH-RLHF,
+  evaluates on the untouched held-out split, writes `results/reward/metrics.json`.
+- [x] Unit tests (`tests/test_reward.py`, 5 tests): Bradley-Terry loss correctness
+  (correctly-ranked pairs score lower loss than reversed; the symmetric r=r case
+  equals log(2) exactly), forward-shape check, an overfit-a-batch training check,
+  and checkpoint save/reload.
+
+**⚠️ Known issue to fix before Phase 8:** this transformers version cannot build a
+fast tokenizer for `prajjwal1/bert-tiny`'s repo (only ships a legacy `vocab.txt`,
+no `tokenizer.json`) — raises `Couldn't instantiate the backend tokenizer`. Tests
+route around it using `bert-base-uncased`'s tokenizer as a stand-in. Before the
+real run: either pin an older `transformers`, use `use_fast=False` with a
+`tokenizers`-compatible fallback, or switch to a tiny BERT repo that ships
+`tokenizer.json` (e.g. a converted upload of bert-tiny).
 
 **Exit criteria:** held-out ranking accuracy computed and logged to
-`results/reward/metrics.json`.
+`results/reward/metrics.json`. ✅ Loop + eval verified correct on CPU with a tiny
+synthetic BERT; real accuracy number pending the RTX 5080 run (blocked on the
+tokenizer issue above).
 
 ---
 
-## Phase 4 — PPO engine (hand-written)
+## Phase 4 — PPO engine (hand-written) ✅ COMPLETE (dev/correctness — real run pending on RTX 5080)
 
-- `src/rlhf_scratch/training/ppo.py`:
-  - Rollout generation from the actor (top-p/temperature sampling).
-  - Reward scoring via the Phase 3 reward model.
-  - Per-token KL penalty against the frozen reference model.
-  - GAE advantage estimation (hand-written, not `trl`'s).
-  - Clipped PPO surrogate objective + value loss + entropy bonus.
-- Logs mean KL per PPO step; run until KL stabilizes near the target (e.g. 0.02-0.1
-  nats, whatever the tuned target is) — that stabilized value becomes the real
-  **[KL]** for bullet 2.
-- `scripts/train_ppo.py` CLI entrypoint; metrics to `results/ppo/metrics.json`.
+- [x] `src/rlhf_scratch/training/ppo.py`, fully hand-written (no `trl`):
+  - `sequence_logprobs()` — teacher-forced per-token log-probs of the actual
+    next tokens.
+  - `compute_kl_penalty()` — per-token `KL(actor‖reference)` via the sampled
+    log-ratio approximation.
+  - `compute_gae()` — Generalized Advantage Estimation. **Caught a real bug via
+    the unit tests**: bootstrapping/propagation must be gated by whether the
+    *next* position is valid (`mask[t+1]`), not the current position
+    (`mask[t]`) — the original version let a padded position's garbage value
+    leak backward into real tokens' advantages. Fixed and now covered by an
+    explicit masking test.
+  - `ppo_clipped_surrogate_loss()` — the clipped PPO objective.
+  - `value_loss()` — masked critic MSE.
+  - `PPOStep` — orchestrates one PPO update (multiple `ppo_epochs` over one
+    rollout batch): combines reward-model score + KL penalty into per-token
+    reward, computes GAE, then clipped-surrogate + value loss, with actor and
+    critic as the only trainable parameters (reference/reward frozen and only
+    queried) — mirrors the two-process-group split from Phase 6/7.
+  - `generate_rollouts()` — samples from the actor, scores with reference/critic/
+    reward model, ready for `PPOStep.update`. Not deeply unit-tested (needs a
+    real generate() loop); exercised for real on the RTX 5080 run.
+- [x] `src/rlhf_scratch/models/critic.py`: `Critic` — causal-LM backbone +
+  per-token scalar head.
+- [x] `scripts/train_ppo.py` CLI entrypoint; writes KL trace to
+  `results/ppo/metrics.json`. Has a known TODO: reward-model scoring currently
+  reuses the actor's tokenizer output rather than re-decoding/re-tokenizing with
+  the reward model's own tokenizer — needs fixing before the real run.
+- [x] Unit tests (`tests/test_ppo.py`, 9 tests): exact numeric checks for
+  `sequence_logprobs`, KL, GAE (single-step, two-step vs. manual recursion,
+  masked-padding), both branches of the clip (clipped vs. unclipped), value
+  loss, plus an integration test running `PPOStep.update` on tiny synthetic
+  actor/critic models for 5 iterations — confirms losses stay finite and KL
+  stays bounded rather than exploding (the closest a dev-only CPU test can get
+  to validating the "converges" claim in bullet 2).
 
 **Exit criteria:** KL trace plotted, converges (not diverging/collapsing); reward
-trending upward over training.
+trending upward over training. ✅ Math verified correct via unit tests (including
+one real bug caught and fixed); the actual convergence trace and final **[KL]**
+number are pending the real toy-data run on the RTX 5080.
 
 ---
 
-## Phase 5 — DPO engine (hand-written)
+## Phase 5 — DPO engine (hand-written) ✅ COMPLETE (dev/correctness — real run pending on RTX 5080)
 
-- `src/rlhf_scratch/training/dpo.py`: reference-free-at-inference DPO loss
-  (uses frozen reference only for the log-ratio term), hand-written per the DPO
-  paper — no `trl`.
-- Same preference data as reward model training, for a clean PPO-vs-DPO comparison.
+- [x] `data/preference_dataset.py::make_dpo_collate_fn` — tokenizes (prompt +
+  chosen) and (prompt + rejected) as two sequences, each prompt-masked to -100,
+  reusing the SFT collate_fn's masking convention.
+- [x] `src/rlhf_scratch/training/dpo.py`, hand-written per Rafailov et al. (no
+  `trl`):
+  - `compute_sequence_logps()` — sums per-token log-probs (via `ppo.sequence_logprobs`)
+    over response tokens only.
+  - `dpo_loss()` — `-log(sigmoid(beta * [(logpi_chosen - logpi_rejected) -
+    (logref_chosen - logref_rejected)]))`, plus implicit per-sequence reward
+    margins (`beta * log-ratio to reference`) for win-rate evaluation.
+  - `DPOTrainer` — trains the policy against a frozen deep-copied reference
+    (reference queried under `torch.no_grad()`, never optimized);
+    `evaluate_win_rate()` — fraction of held-out pairs where the implicit
+    reward ranks chosen above rejected, DPO's analogue of the reward model's
+    ranking accuracy.
+- [x] `scripts/train_dpo.py` CLI entrypoint — same toy/full HH-RLHF data as
+  Phase 3, for a clean PPO-vs-DPO comparison on identical data.
+- [x] Unit tests (`tests/test_dpo.py`, 6 tests): loss correctness (favoring
+  chosen relative to reference lowers the loss; the zero-logratio-gap case
+  equals `log(2)` exactly, mirroring the Bradley-Terry symmetric case), prompt
+  masking in both chosen/rejected, an overfit-a-batch training check, and
+  explicit verification that the reference model's parameters never change
+  across training steps.
 
 **Exit criteria:** DPO run completes; win-rate vs. SFT baseline measured on held-out
 prompts (secondary metric, supports bullet 1's "instead of wrapping trl" claim with
-a working alternative).
+a working alternative). ✅ Loop + math verified correct on CPU with a tiny synthetic
+model; real win-rate number pending the RTX 5080 run.
 
 ---
 
-## Phase 6 — Distributed topology (design + single-GPU simulation)
+## Phase 6 — Distributed topology + VRAM/bytes benchmark (single-GPU, RTX 5080)
 
 - `src/rlhf_scratch/distributed/topology.py`: two `dist.new_group()` groups —
-  Group A (actor+critic, trainable), Group B (reference+reward, frozen/inference).
+  Group A (actor+critic, trainable), Group B (reference+reward, frozen/inference) —
+  launched as two processes on the one RTX 5080 via `torch.multiprocessing.spawn`,
+  each capped with `torch.cuda.set_per_process_memory_fraction()`.
 - `src/rlhf_scratch/distributed/comm_hooks.py`: minimal cross-group payload
   (rollout tokens, log-probs, scalar rewards only — never full gradients/optimizer
-  state across groups).
-- Validate on the 4050 via `torch.multiprocessing.spawn` with multiple processes
-  sharing the one GPU (gloo or NCCL-on-one-device) — checks correctness and
-  deadlock-freedom only. VRAM/comms numbers from this run are **not** used as the
-  final bullet-3 metric (single GPU can't show a real reduction — see PLANNING
-  rationale above); they're logged separately as "simulation, not final."
+  state across groups) + a byte-counter wrapping every cross-group send.
+- **Baseline run:** all 4 models (actor, critic, reference, reward) loaded into a
+  single process/group; record peak VRAM (`torch.cuda.max_memory_allocated`).
+- **Split run:** Group A loads only actor+critic, Group B loads only
+  reference+reward; record peak VRAM per process, and total bytes crossing the
+  group boundary over N rollout steps.
+- Compute real **[X]% VRAM reduction** (split vs. baseline) and real **[Y]% fewer
+  bytes exchanged** (only what crosses groups vs. what a merged single-group setup
+  would move internally). Record raw before/after numbers in
+  `results/distributed_benchmark/`, not just the ratio, so the claim is auditable.
+- No wall-clock/bandwidth communication-time claim is made (see hardware plan
+  above for why that specifically needs separate physical GPUs).
 
-**Exit criteria:** topology tests pass (`tests/test_distributed.py`); no deadlocks
-across ≥50 simulated steps.
-
----
-
-## Phase 7 — Multi-GPU benchmark (rented hardware, final numbers)
-
-- Rent a 2-GPU cloud instance for ~1 hour (Vast.ai/RunPod spot or similar).
-- Baseline run: all 4 models in one process group on GPU0 (or replicated), measure
-  peak VRAM (`torch.cuda.max_memory_allocated`) and NCCL bytes transferred.
-- Split run: actor+critic on GPU0's group, reference+reward on GPU1's group, same
-  measurement.
-- Compute real **[X]% VRAM reduction** and **[Y]% comms reduction** from the two
-  runs. Record raw logs in `results/distributed_benchmark/`.
-
-**Exit criteria:** both real percentages recorded with raw before/after numbers,
-not just the ratio (so the claim is auditable).
+**Exit criteria:** topology tests pass (`tests/test_distributed.py`), no deadlocks
+across ≥50 simulated steps; both real percentages (VRAM, bytes) recorded with raw
+numbers on the RTX 5080. No cloud rental required.
 
 ---
 
-## Phase 8 — Integration, docs, final numbers
+## Phase 7 — Integration, docs, final numbers
 
 - `scripts/run_e2e_toy.py`: single command running SFT → Reward → PPO (or DPO) on
-  the toy split end-to-end on the 4050, timed.
+  the toy split end-to-end on the RTX 5080, timed.
 - Fill in the four project-summary bullets with the real measured values from
-  Phases 3, 4, 7.
+  Phases 3, 4, 6.
 - `README.md`: quick start, validated-vs-designed table (mirroring the honesty
   style of the reference repo), results tables/plots in `results/`.
 - `docs/`: short write-ups per component (PPO math, DPO math, topology rationale).
@@ -199,7 +266,7 @@ reproduces the headline numbers within noise.
 
 ## Sequencing note
 
-Phases 1-6 have no external dependency beyond the local 4050 and can run
-back-to-back. Phase 7 is the only phase gated on renting hardware — everything
-else is fully buildable and testable without it, and the code doesn't change
-based on when Phase 7 happens.
+Phases 1-6 have no external dependency beyond the local dev machine (code +
+correctness) and the RTX 5080 (real runs) — no cloud rental needed anywhere in
+this plan. Phase 6's distributed benchmark runs entirely on the RTX 5080 as two
+processes sharing the one GPU.
