@@ -37,29 +37,38 @@ Reference implementation for architectural ideas (not copied): `../Improving-LLM
 
 ---
 
-## Phase 0 — Scaffolding (this step)
+## Phase 0 — Scaffolding ✅ COMPLETE
 
-- [x] Sibling repo `rlhf-ppo-dpo-scratch/` created.
 - [x] Package skeleton: `src/rlhf_scratch/{models,data,training,distributed,utils}`.
 - [x] `tests/`, `configs/`, `scripts/`, `docs/`, `results/`, `notebooks/` directories.
-- [ ] `pyproject.toml`, `requirements.txt`, `.gitignore`, `README.md` stub.
-- [ ] `git init` + first commit.
+- [x] `pyproject.toml`, `.gitignore`, `README.md` stub.
+- [x] Repo already tracked in git with a GitHub remote (`fine-tuning-rlhf-ppo-dpo`).
 
-**Exit criteria:** `pip install -e .` succeeds; package imports cleanly.
+**Exit criteria:** `pip install -e .` succeeds; package imports cleanly. ✅ Verified —
+editable install succeeds, `import rlhf_scratch` + all five subpackages import clean.
 
 ---
 
-## Phase 1 — Data pipeline
+## Phase 1 — Data pipeline ✅ COMPLETE
 
-- Download/cache Anthropic HH-RLHF via `datasets`.
-- `src/rlhf_scratch/data/preference_dataset.py`: loads (prompt, chosen, rejected)
-  triples, tokenizes for both distilgpt2 and bert-tiny tokenizers.
-- Toy-mode flag: subsamples to ~1K pairs, with a fixed held-out split (~200 pairs)
-  reserved untouched until the Phase 4 evaluation.
-- Unit tests: dataset shapes, padding/truncation, no leakage between train/held-out.
+- [x] `src/rlhf_scratch/data/preference_dataset.py`: downloads/caches
+  `Anthropic/hh-rlhf` via `datasets`, extracts (prompt, chosen, rejected) triples
+  by diffing the shared prefix of `chosen`/`rejected` at the last `Assistant:`
+  turn marker.
+- [x] `load_preference_pairs(split, toy, seed)`: fixed seeded shuffle carves out a
+  **200-pair held-out split first**, before any toy subsampling — so held-out stays
+  identical across toy/full runs and is never trained on. `toy=True` subsamples the
+  remainder to 1,000 pairs.
+- [x] `PreferenceDataset` (torch `Dataset`) + `make_collate_fn(tokenizer)` — same
+  dataset backs both the distilgpt2 actor and bert-tiny reward model, since
+  tokenization happens per-tokenizer at collation time, not at dataset build time.
+- [x] Unit tests (`tests/test_data.py`, 6 tests): prompt-extraction correctness,
+  dataset `len`/`getitem`, collate_fn output shapes/keys, toy-vs-held-out
+  disjointness, held-out seed-stability across calls.
 
 **Exit criteria:** `pytest tests/test_data.py` green; a batch round-trips through both
-tokenizers with correct shapes.
+tokenizers with correct shapes. ✅ Verified — `6 passed` against the real
+`Anthropic/hh-rlhf` dataset (network download confirmed working), 41s runtime.
 
 ---
 
