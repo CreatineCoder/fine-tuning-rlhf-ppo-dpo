@@ -82,6 +82,37 @@ class PreferenceDataset(Dataset):
         return PreferencePair(prompt=row["prompt"], chosen=row["chosen"], rejected=row["rejected"])
 
 
+def make_sft_collate_fn(tokenizer: PreTrainedTokenizerBase, max_length: int = 512):
+    """Collate for SFT: tokenizes (prompt + chosen) as one sequence, with prompt
+    tokens masked to -100 in `labels` so the causal LM loss only trains on the
+    chosen response tokens, not the prompt itself."""
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    def collate_fn(batch: list[PreferencePair]) -> dict[str, torch.Tensor]:
+        full_text = [p.prompt + p.chosen for p in batch]
+        prompt_lens = [
+            len(tokenizer(p.prompt, truncation=True, max_length=max_length)["input_ids"])
+            for p in batch
+        ]
+
+        enc = tokenizer(
+            full_text, padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+        )
+        input_ids = enc["input_ids"]
+        attention_mask = enc["attention_mask"]
+
+        labels = input_ids.clone()
+        for i, prompt_len in enumerate(prompt_lens):
+            labels[i, :prompt_len] = -100
+        labels[attention_mask == 0] = -100
+
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+    return collate_fn
+
+
 def make_collate_fn(tokenizer: PreTrainedTokenizerBase, max_length: int = 512):
     """Builds a collate_fn that tokenizes (prompt + response) for chosen/rejected
     with the given tokenizer. Same dataset works for any tokenizer this way, so

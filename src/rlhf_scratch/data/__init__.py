@@ -4,6 +4,7 @@ from rlhf_scratch.data.preference_dataset import (
     extract_prompt,
     load_preference_pairs,
     make_collate_fn,
+    make_sft_collate_fn,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "extract_prompt",
     "load_preference_pairs",
     "make_collate_fn",
+    "make_sft_collate_fn",
 ]

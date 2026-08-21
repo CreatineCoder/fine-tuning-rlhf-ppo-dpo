@@ -3,8 +3,8 @@
 ## Goal
 
 Build an RLHF stack (SFT → Reward Model → PPO → DPO) entirely by hand — no `trl` — and
-run it end-to-end on a single consumer GPU (RTX 4050, 6GB) so every number in the
-project summary is measured, not estimated:
+run it end-to-end on GPU so every number in the project summary is measured, not
+estimated:
 
 1. Implemented the RLHF stack from scratch, hand-writing SFT, Bradley-Terry reward
    modeling, PPO and DPO losses instead of wrapping `trl`.
@@ -19,13 +19,21 @@ Reference implementation for architectural ideas (not copied): `../Improving-LLM
 
 ## Hardware plan
 
-- **Primary dev/training GPU:** RTX 4050 (6GB VRAM), local. Used for bullets 1, 2, 4
-  in full — distilgpt2 (~82M params) + bert-tiny (~4.4M params) fit comfortably.
-- **Bullet 3 (multi-GPU NCCL topology):** code is written and correctness-tested on
-  the 4050 via single-GPU multi-process simulation throughout Phases 1-6. The final
-  VRAM/comms numbers are captured in **Phase 7**, on a rented 2-GPU cloud instance
-  (~1 hour, e.g. Vast.ai/RunPod spot). Until that run happens, this bullet stays
-  labeled "designed + simulated, hardware-pending" — never a fabricated number.
+- **Dev machine (this one):** GTX 1650, driver too old for any CUDA build torch
+  currently supports (`cuda.is_available()` is `False`). Used **CPU-only, code +
+  correctness only** — every engine (SFT/reward/PPO/DPO) is written and unit-tested
+  here against tiny synthetic data/models, never run as a real training job.
+- **Training machine:** separate machine with an RTX 5080, used later to actually run
+  the toy pipeline end-to-end and produce the real numbers for bullets 1, 2, 4.
+- **Bullet 3 (multi-GPU NCCL topology):** a single GPU — even the 5080 — cannot be
+  split into two independent devices for this (no MIG on consumer RTX cards; multiple
+  processes on one GPU still share one VRAM pool/bus, so any measurement that way is
+  a simulation, not a real result). Code is written and correctness-tested via
+  single-GPU multi-process simulation throughout Phases 1-6. The final VRAM/comms
+  numbers require a **second, separate GPU** alongside the 5080 (or a rented 2-GPU
+  cloud instance) and are captured in **Phase 7**. Until that run happens, this
+  bullet stays labeled "designed + simulated, hardware-pending" — never a fabricated
+  number.
 
 ## Models & data
 
@@ -72,16 +80,28 @@ tokenizers with correct shapes. ✅ Verified — `6 passed` against the real
 
 ---
 
-## Phase 2 — SFT (hand-written)
+## Phase 2 — SFT (hand-written) ✅ COMPLETE (dev/correctness — real run pending on RTX 5080)
 
-- `src/rlhf_scratch/training/sft.py`: plain PyTorch training loop (no `Trainer`,
-  no `trl`) — causal LM loss on chosen responses, AMP, gradient accumulation for
-  the 4050's 6GB budget.
-- `scripts/train_sft.py` CLI entrypoint.
-- Checkpoint saved to `results/sft/`.
+- [x] `data/preference_dataset.py::make_sft_collate_fn` — tokenizes (prompt +
+  chosen) as one sequence, masks prompt + pad tokens to `-100` in `labels` so the
+  causal LM loss only trains on response tokens.
+- [x] `src/rlhf_scratch/training/sft.py`: plain PyTorch training loop (no
+  `Trainer`, no `trl`) — `sft_loss()` (manual shifted cross-entropy, ignoring
+  masked positions) + `SFTTrainer` (explicit AMP autocast/GradScaler, gradient
+  accumulation, grad-norm clipping, checkpoint saving).
+- [x] `scripts/train_sft.py` CLI entrypoint (typer) — loads `distilgpt2` +
+  toy/full HH-RLHF data, runs `SFTTrainer`, saves to `results/sft/checkpoint`.
+- [x] Unit tests (`tests/test_sft.py`, 4 tests) against a tiny randomly-initialized
+  GPT-2 (2 layers, n_embd=16) — no model download needed, fast on CPU:
+  masked-position loss correctness, prompt-masking in the collate_fn, an actual
+  overfit-a-single-batch check (loss must decrease over epochs — proves the loop
+  really trains, not just runs), and checkpoint save/reload shape.
 
 **Exit criteria:** SFT loss curve decreasing and logged; checkpoint loadable by
-Phase 3/4.
+Phase 3/4. ✅ Verified on CPU with the tiny synthetic model (`test_sft_trainer_reduces_loss_on_single_batch`).
+⚠️ Not yet run as a real training job on `distilgpt2` + real toy data — that
+happens on the RTX 5080 machine per the updated hardware plan above; this dev
+machine (GTX 1650, CPU-only torch) is code + correctness only.
 
 ---
 
