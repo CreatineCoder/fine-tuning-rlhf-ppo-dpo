@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# data & checkpoints
+data/cache/
+results/**/*.pt
+results/**/*.bin
+results/**/checkpoints/
+
+# local env
+.env

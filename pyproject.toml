@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rlhf-scratch"
+version = "0.1.0"
+description = "Hand-written RLHF stack (SFT, Bradley-Terry reward model, PPO, DPO) — no trl."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "datasets>=2.19",
+    "accelerate>=0.30",
+    "numpy",
+    "pydantic>=2.0",
+    "pyyaml",
+    "typer>=0.12",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "mypy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
