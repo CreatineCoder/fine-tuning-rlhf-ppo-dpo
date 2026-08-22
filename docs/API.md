@@ -1,8 +1,7 @@
 # API Documentation
 
-Reference for the public surface of `rlhf_scratch` (Phases 1-5: data pipeline,
-SFT, Bradley-Terry reward model, PPO, DPO). Phase 6 (`rlhf_scratch.distributed`)
-is documented separately once built.
+Reference for the public surface of `rlhf_scratch` (Phases 1-6: data pipeline,
+SFT, Bradley-Terry reward model, PPO, DPO, distributed topology).
 
 All modules live under `src/rlhf_scratch/`. Import from the top-level
 subpackage (`rlhf_scratch.data`, `rlhf_scratch.models`, `rlhf_scratch.training`)
@@ -324,6 +323,106 @@ class DPOConfig:
 
 ---
 
+## `rlhf_scratch.distributed`
+
+Two-process-group topology (trainable actor-critic vs. frozen
+reference-reward) and the VRAM/bytes-exchanged benchmark. See PLANNING.md's
+hardware plan for exactly what a single-GPU multi-process setup can and can't
+honestly measure (VRAM and bytes-exchanged: yes; wall-clock communication
+savings: no).
+
+### `topology.py`
+
+#### `Topology`
+
+```python
+@dataclass
+class Topology:
+    rank: int
+    world_size: int
+    actor_critic_ranks: list[int]
+    ref_reward_ranks: list[int]
+    actor_critic_group: dist.ProcessGroup
+    ref_reward_group: dist.ProcessGroup
+
+    @property
+    def is_trainable(self) -> bool: ...   # True if this rank is in actor_critic_ranks
+    @property
+    def my_group(self) -> dist.ProcessGroup: ...  # this rank's own group
+```
+
+#### `init_process_group(rank, world_size, backend="gloo", master_addr="127.0.0.1", master_port="29500") -> None`
+
+Thin wrapper around `dist.init_process_group`, setting `MASTER_ADDR`/
+`MASTER_PORT` env vars if not already set. `backend="gloo"` for CPU dev
+testing, `"nccl"` for the real GPU run.
+
+#### `build_topology(rank, world_size, actor_critic_ranks, ref_reward_ranks) -> Topology`
+
+Creates the two `dist.new_group()`s. **Must be called by every rank in
+`world_size`** — `new_group()` is a collective call; skipping it on any rank
+deadlocks the others. Raises `ValueError` if the two rank lists overlap, or if
+`rank` isn't in either.
+
+#### `teardown() -> None`
+
+Calls `dist.destroy_process_group()` if a group is initialized.
+
+### `comm_hooks.py`
+
+#### `ByteCounter`
+
+```python
+@dataclass
+class ByteCounter:
+    total_bytes: int = 0
+    def count(self, tensor: Tensor) -> None: ...  # += element_size * nelement
+    def reset(self) -> None: ...
+```
+
+#### `send_cross_group(tensor, dst, counter=None) -> None` / `recv_cross_group(tensor, src) -> Tensor`
+
+Point-to-point `dist.send`/`dist.recv` on the **default (world) group** —
+subgroups from `new_group()` can't talk to ranks outside themselves, so
+cross-group traffic (rollout tokens, log-probs, reward scalars — never
+gradients/optimizer state) always routes through the world group. Caller and
+receiver must agree on tensor shape/dtype ahead of time (recv needs a
+pre-allocated buffer of the right shape).
+
+### `benchmark.py`
+
+#### `measure_peak_vram_mb(device=None) -> float`
+
+`torch.cuda.max_memory_allocated(device) / 1024**2`. Returns **0.0 if CUDA
+isn't available** — callers must not treat that as a real measurement (this
+dev machine always returns 0.0; real numbers come from the RTX 5080).
+
+#### `reset_vram_stats(device=None) -> None`
+
+`torch.cuda.reset_peak_memory_stats(device)` if CUDA is available, else no-op.
+
+#### `BenchmarkResult`
+
+```python
+@dataclass
+class BenchmarkResult:
+    baseline_vram_mb: float
+    split_vram_mb: float
+    baseline_bytes: int
+    split_bytes: int
+
+    @property
+    def vram_reduction_pct(self) -> float: ...   # 0.0 if baseline_vram_mb == 0
+    @property
+    def bytes_reduction_pct(self) -> float: ...  # 0.0 if baseline_bytes == 0
+    def to_dict(self) -> dict: ...
+```
+
+Holds raw before/after numbers alongside the computed percentages, so the
+final bullet-3 claim stays auditable rather than just reporting a ratio.
+
+---
+
 ## CLI entrypoints (`scripts/`)
 
 Each wraps the corresponding trainer for a real run; not run on the CPU-only
@@ -335,6 +434,7 @@ dev machine (see `PLANNING.md` hardware plan) — intended for the RTX 5080.
 | `scripts/train_reward.py` | `RewardTrainer` | `--base-model-name`, `--toy`, `--epochs`, `--batch-size`, `--lr`, `--output-dir` |
 | `scripts/train_ppo.py` | `PPOStep` + `generate_rollouts` | `--actor-checkpoint`, `--reward-checkpoint`, `--toy`, `--steps`, `--batch-size`, `--max-new-tokens`, `--lr`, `--output-dir` |
 | `scripts/train_dpo.py` | `DPOTrainer` | `--policy-checkpoint`, `--toy`, `--epochs`, `--batch-size`, `--lr`, `--beta`, `--output-dir` |
+| `scripts/benchmark_topology.py` | `Topology` + `BenchmarkResult` | `--actor-name`, `--reward-base`, `--rollout-steps`, `--output-dir`. Requires CUDA — exits early otherwise. Draft; needs refinement on real hardware (see PLANNING.md Phase 6). |
 
 All are `typer` apps — run `python scripts/<name>.py --help` for the full
 flag list.

@@ -222,30 +222,47 @@ model; real win-rate number pending the RTX 5080 run.
 
 ---
 
-## Phase 6 — Distributed topology + VRAM/bytes benchmark (single-GPU, RTX 5080)
+## Phase 6 — Distributed topology + VRAM/bytes benchmark (single-GPU, RTX 5080) ✅ CODE COMPLETE (real benchmark numbers pending RTX 5080)
 
-- `src/rlhf_scratch/distributed/topology.py`: two `dist.new_group()` groups —
-  Group A (actor+critic, trainable), Group B (reference+reward, frozen/inference) —
-  launched as two processes on the one RTX 5080 via `torch.multiprocessing.spawn`,
-  each capped with `torch.cuda.set_per_process_memory_fraction()`.
-- `src/rlhf_scratch/distributed/comm_hooks.py`: minimal cross-group payload
-  (rollout tokens, log-probs, scalar rewards only — never full gradients/optimizer
-  state across groups) + a byte-counter wrapping every cross-group send.
-- **Baseline run:** all 4 models (actor, critic, reference, reward) loaded into a
-  single process/group; record peak VRAM (`torch.cuda.max_memory_allocated`).
-- **Split run:** Group A loads only actor+critic, Group B loads only
-  reference+reward; record peak VRAM per process, and total bytes crossing the
-  group boundary over N rollout steps.
-- Compute real **[X]% VRAM reduction** (split vs. baseline) and real **[Y]% fewer
-  bytes exchanged** (only what crosses groups vs. what a merged single-group setup
-  would move internally). Record raw before/after numbers in
-  `results/distributed_benchmark/`, not just the ratio, so the claim is auditable.
-- No wall-clock/bandwidth communication-time claim is made (see hardware plan
-  above for why that specifically needs separate physical GPUs).
+- [x] `src/rlhf_scratch/distributed/topology.py`: `Topology` dataclass +
+  `build_topology()` — two `dist.new_group()` groups, Group A (actor+critic,
+  trainable) and Group B (reference+reward, frozen/inference), plus
+  `init_process_group()`/`teardown()` helpers. Backend-agnostic (`gloo` for
+  CPU dev testing, `nccl` for the real GPU run).
+- [x] `src/rlhf_scratch/distributed/comm_hooks.py`: `send_cross_group()` /
+  `recv_cross_group()` — point-to-point on the default (world) group, since
+  `dist.new_group()` subgroups can't talk to ranks outside themselves — wrapped
+  with `ByteCounter` so cross-group traffic (rollout tokens, log-probs, reward
+  scalars — never gradients/optimizer state) is counted in real bytes.
+- [x] `src/rlhf_scratch/distributed/benchmark.py`: `measure_peak_vram_mb()`
+  (`torch.cuda.max_memory_allocated`, returns 0.0 off-CUDA — never faked) and
+  `BenchmarkResult` (computes `vram_reduction_pct` / `bytes_reduction_pct` from
+  raw baseline-vs-split numbers).
+- [x] Unit tests:
+  - `tests/test_distributed.py` (2 tests, real multi-process `gloo` over 4 OS
+    processes via `torch.multiprocessing.spawn`): confirms `build_topology`
+    correctly isolates `all_reduce` within each group (group {0,1} sums to 1,
+    group {2,3} sums to 5 — proves no cross-talk), and a **50-step** cross-group
+    send/recv loop completes without deadlock with an exact byte count
+    (`50 × 8 float32 × 4 bytes = 1600`) — satisfies the "≥50 simulated steps"
+    exit criterion.
+  - `tests/test_benchmark.py` (4 tests): `ByteCounter` accumulation/reset,
+    `BenchmarkResult` percentage math (including the zero-baseline edge case),
+    and `measure_peak_vram_mb` returning 0.0 off-CUDA rather than a fake number.
+- [x] `scripts/benchmark_topology.py` — draft CLI for the real run: spawns a
+  single-process baseline (all 4 models) vs. a two-process split (Group A / B)
+  on the RTX 5080, each capped via `set_per_process_memory_fraction(0.5)`,
+  writes `results/distributed_benchmark/metrics.json`. **Not yet run for real**
+  (needs CUDA) and the byte-counting logic inside it is a rough placeholder —
+  needs a pass once running on actual hardware to make the "bytes that would
+  cross" measurement reflect real rollout payload sizes rather than a fixed
+  dummy tensor.
 
 **Exit criteria:** topology tests pass (`tests/test_distributed.py`), no deadlocks
-across ≥50 simulated steps; both real percentages (VRAM, bytes) recorded with raw
-numbers on the RTX 5080. No cloud rental required.
+across ≥50 simulated steps. ✅ Verified — both tests pass, 50-step loop completes
+cleanly. Real **[X]% VRAM reduction** and **[Y]% bytes-reduction** numbers are
+still pending an actual run of `scripts/benchmark_topology.py` on the RTX 5080 —
+code is written and tested, but no cloud rental is needed to get there.
 
 ---
 
