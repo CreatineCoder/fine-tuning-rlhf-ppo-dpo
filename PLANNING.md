@@ -266,6 +266,44 @@ code is written and tested, but no cloud rental is needed to get there.
 
 ---
 
+## Pre-flight hardening (before Phase 7) ✅ COMPLETE
+
+Went back through Phases 4-6 looking specifically for things that would only
+surface once running for real on the RTX 5080 — expensive to debug remotely —
+and split them into "fix now" vs. "environment risk to check first":
+
+- **Fixed a real correctness bug** in `training/ppo.py::generate_rollouts`:
+  it was feeding the actor's raw GPT-2 BPE token ids directly into the
+  bert-tiny reward model. Both are just int64 tensors in range, so this would
+  have run without error and silently scored meaningless token ids — corrupting
+  every reward signal PPO trains against. Fixed: `generate_rollouts` now takes
+  a `reward_tokenizer` param, decodes generated ids with the actor's tokenizer
+  and re-encodes with the reward model's own tokenizer before scoring.
+  `scripts/train_ppo.py` updated to pass it through. New regression test:
+  `tests/test_ppo.py::test_generate_rollouts_scores_with_reward_tokenizer_not_actor_ids`
+  (uses two genuinely different tiny tokenizers — GPT-2 BPE vs. BERT
+  WordPiece — so a regression back to feeding raw ids would crash on an
+  out-of-range embedding lookup, not just produce a silently wrong number).
+- **`scripts/benchmark_topology.py` now degrades gracefully instead of failing**:
+  NCCL does not run on native Windows (only Linux/WSL2). The script now checks
+  `torch.distributed.is_nccl_available()` and falls back to `backend="gloo"`
+  with a clear message instead of crashing outright if the RTX 5080 machine
+  turns out to be Windows without WSL2.
+- **New `scripts/preflight_check.py`** — run first on the RTX 5080, before any
+  real training job. Checks: CUDA visible, NCCL backend availability (the
+  Windows risk above), a real AMP autocast+GradScaler forward/backward
+  round-trip, the `distilgpt2` tokenizer loads, the `prajjwal1/bert-tiny`
+  tokenizer loads (the known Phase 3 issue — reported with the same fix
+  suggestions already in PLANNING.md), `sentencepiece` importable, and
+  `huggingface.co` reachable (needed for the HH-RLHF download). Exits non-zero
+  if anything fails, so environment problems surface in seconds instead of
+  mid-training. **Verified on this dev machine**: correctly reports the three
+  known-true failures here (no CUDA, no NCCL, bert-tiny tokenizer) and passes
+  everything else — confirms the script does catch real issues, not just
+  always-green noise.
+
+---
+
 ## Phase 7 — Integration, docs, final numbers
 
 - `scripts/run_e2e_toy.py`: single command running SFT → Reward → PPO (or DPO) on

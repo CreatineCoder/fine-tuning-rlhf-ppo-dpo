@@ -1,13 +1,15 @@
 import torch
 from torch import nn
 from torch.optim import AdamW
-from transformers import AutoTokenizer, GPT2Config, GPT2LMHeadModel
+from transformers import AutoTokenizer, BertConfig, BertModel, GPT2Config, GPT2LMHeadModel
 
+from rlhf_scratch.models import RewardModel
 from rlhf_scratch.models.critic import Critic
 from rlhf_scratch.training import (
     PPOConfig,
     PPOStep,
     compute_gae,
+    generate_rollouts,
     compute_kl_penalty,
     ppo_clipped_surrogate_loss,
     sequence_logprobs,
@@ -157,3 +159,56 @@ def test_ppo_step_update_runs_and_produces_finite_bounded_kl():
 
     # KL penalty should keep divergence from the frozen reference bounded, not exploding
     assert max(abs(k) for k in kl_trace) < 5.0
+
+
+def _tiny_reward_model_and_tokenizer():
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    config = BertConfig(
+        vocab_size=tokenizer.vocab_size,
+        hidden_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        intermediate_size=32,
+        max_position_embeddings=64,
+    )
+    model = RewardModel.__new__(RewardModel)
+    nn.Module.__init__(model)
+    model.encoder = BertModel(config)
+    model.value_head = nn.Linear(config.hidden_size, 1)
+    return model, tokenizer
+
+
+def test_generate_rollouts_scores_with_reward_tokenizer_not_actor_ids():
+    """Regression test for a real bug: generated token ids are GPT-2 BPE ids and
+    must be decoded + re-tokenized with the reward model's own (different)
+    vocabulary before scoring, not fed to the reward model directly."""
+    actor, actor_tokenizer = _tiny_actor_and_tokenizer()
+    reference, _ = _tiny_actor_and_tokenizer()
+    critic = Critic.__new__(Critic)
+    nn.Module.__init__(critic)
+    critic.backbone = GPT2LMHeadModel(actor.config).transformer
+    critic.value_head = nn.Linear(actor.config.n_embd, 1)
+
+    reward_model, reward_tokenizer = _tiny_reward_model_and_tokenizer()
+
+    prompt = ["Human: hi\n\nAssistant:", "Human: yo\n\nAssistant:"]
+    enc = actor_tokenizer(prompt, padding=True, return_tensors="pt")
+
+    rollout_batch = generate_rollouts(
+        actor,
+        reference,
+        critic,
+        reward_model,
+        enc["input_ids"],
+        enc["attention_mask"],
+        actor_tokenizer,
+        reward_tokenizer,
+        max_new_tokens=4,
+    )
+
+    assert rollout_batch["env_rewards"].shape == (2,)
+    assert torch.isfinite(rollout_batch["env_rewards"]).all()
+    # reward model's vocab is unrelated to the actor's -- if raw actor ids had
+    # been fed in directly, any out-of-range id would crash the embedding
+    # lookup; reaching here at all confirms decode/re-encode happened.
+    assert rollout_batch["old_logprobs"].shape == rollout_batch["ref_logprobs"].shape

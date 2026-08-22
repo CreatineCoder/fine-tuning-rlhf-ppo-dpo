@@ -206,16 +206,26 @@ def generate_rollouts(
     prompt_input_ids: torch.Tensor,
     prompt_attention_mask: torch.Tensor,
     tokenizer,
+    reward_tokenizer,
     max_new_tokens: int = 32,
     temperature: float = 1.0,
     top_p: float = 1.0,
+    reward_max_length: int = 512,
 ) -> dict[str, torch.Tensor]:
     """Samples responses from the actor, then scores them with the reference
     model (for KL), the critic (for values), and the reward model — producing
     a rollout batch ready for `PPOStep.update`.
 
+    `tokenizer` (the actor's) and `reward_tokenizer` are almost always
+    different vocabularies (e.g. GPT-2 BPE vs. BERT WordPiece) — generated
+    token ids are decoded with `tokenizer` and re-encoded with
+    `reward_tokenizer` before scoring, rather than feeding the actor's raw ids
+    into the reward model. Feeding them directly would run without error
+    (both are just int64 tensors within range) but score meaningless token
+    ids, silently corrupting every reward signal PPO trains against.
+
     Not used in unit tests beyond a shape smoke-test — the real end-to-end
-    generate-and-score loop is exercised on the RTX 5080 training run (Phase 8).
+    generate-and-score loop is exercised on the RTX 5080 training run.
     """
     device = prompt_input_ids.device
     actor.eval()
@@ -242,8 +252,11 @@ def generate_rollouts(
 
     old_values = critic(input_ids=generated)[:, :-1]
 
-    attention_mask = (generated != tokenizer.pad_token_id).to(torch.float32)
-    env_rewards = reward_model(generated, attention_mask.long())
+    generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
+    reward_enc = reward_tokenizer(
+        generated_texts, padding=True, truncation=True, max_length=reward_max_length, return_tensors="pt"
+    ).to(device)
+    env_rewards = reward_model(reward_enc["input_ids"], reward_enc["attention_mask"])
 
     actor.train()
 

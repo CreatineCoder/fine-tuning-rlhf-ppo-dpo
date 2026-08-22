@@ -259,16 +259,17 @@ Actor + critic are trainable; reference/reward are only ever queried upstream
   `env_rewards (B,)`.
 - `save_checkpoint(path)` — writes `actor.pt` and `critic.pt` under `path`.
 
-### `generate_rollouts(actor, reference, critic, reward_model, prompt_input_ids, prompt_attention_mask, tokenizer, max_new_tokens=32, temperature=1.0, top_p=1.0) -> dict`
+### `generate_rollouts(actor, reference, critic, reward_model, prompt_input_ids, prompt_attention_mask, tokenizer, reward_tokenizer, max_new_tokens=32, temperature=1.0, top_p=1.0, reward_max_length=512) -> dict`
 
 Samples responses from `actor.generate(...)`, then scores them with
 `reference` (for KL), `critic` (for values), and `reward_model`. Returns a
 dict shaped for `PPOStep.update`. Runs under `torch.no_grad()`.
 
-⚠️ Known TODO (see `scripts/train_ppo.py`): reward-model scoring currently
-reuses the actor's tokenizer output rather than re-decoding/re-tokenizing
-generated text with the reward model's own tokenizer — fix before the real
-training run if actor and reward-model tokenizers differ.
+Generated token ids are decoded with `tokenizer` (the actor's) and
+**re-encoded with `reward_tokenizer`** before scoring — actor and reward model
+almost always use different vocabularies (e.g. GPT-2 BPE vs. BERT WordPiece),
+and feeding one model's raw ids into the other would run without error but
+score meaningless tokens. See `tests/test_ppo.py::test_generate_rollouts_scores_with_reward_tokenizer_not_actor_ids`.
 
 ---
 
@@ -434,7 +435,8 @@ dev machine (see `PLANNING.md` hardware plan) — intended for the RTX 5080.
 | `scripts/train_reward.py` | `RewardTrainer` | `--base-model-name`, `--toy`, `--epochs`, `--batch-size`, `--lr`, `--output-dir` |
 | `scripts/train_ppo.py` | `PPOStep` + `generate_rollouts` | `--actor-checkpoint`, `--reward-checkpoint`, `--toy`, `--steps`, `--batch-size`, `--max-new-tokens`, `--lr`, `--output-dir` |
 | `scripts/train_dpo.py` | `DPOTrainer` | `--policy-checkpoint`, `--toy`, `--epochs`, `--batch-size`, `--lr`, `--beta`, `--output-dir` |
-| `scripts/benchmark_topology.py` | `Topology` + `BenchmarkResult` | `--actor-name`, `--reward-base`, `--rollout-steps`, `--output-dir`. Requires CUDA — exits early otherwise. Draft; needs refinement on real hardware (see PLANNING.md Phase 6). |
+| `scripts/benchmark_topology.py` | `Topology` + `BenchmarkResult` | `--actor-name`, `--reward-base`, `--rollout-steps`, `--backend` (default `nccl`, auto-falls-back to `gloo` if NCCL isn't available), `--output-dir`. Requires CUDA — exits early otherwise. Draft; needs refinement on real hardware (see PLANNING.md Phase 6). |
+| `scripts/preflight_check.py` | — | No flags. Run first on the RTX 5080 before any real training job: checks CUDA, NCCL availability, AMP round-trip, both tokenizers, `sentencepiece`, network reachability. Exits non-zero on any failure. |
 
 All are `typer` apps — run `python scripts/<name>.py --help` for the full
 flag list.

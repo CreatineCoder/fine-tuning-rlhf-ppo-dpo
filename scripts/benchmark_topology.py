@@ -63,8 +63,8 @@ def _baseline_worker(rank: int, actor_name: str, reward_base: str, master_port: 
     result_queue.put(("baseline", vram_mb, counter.total_bytes))
 
 
-def _split_worker(rank: int, actor_name: str, reward_base: str, master_port: str, rollout_steps: int, result_queue) -> None:
-    init_process_group(rank, WORLD_SIZE, backend="nccl", master_port=master_port)
+def _split_worker(rank: int, actor_name: str, reward_base: str, master_port: str, rollout_steps: int, backend: str, result_queue) -> None:
+    init_process_group(rank, WORLD_SIZE, backend=backend, master_port=master_port)
     build_topology(rank, WORLD_SIZE, ACTOR_CRITIC_RANKS, REF_REWARD_RANKS)
 
     device = torch.device(f"cuda:{rank}" if torch.cuda.device_count() > 1 else "cuda")
@@ -95,11 +95,21 @@ def main(
     actor_name: str = "distilgpt2",
     reward_base: str = "prajjwal1/bert-tiny",
     rollout_steps: int = 50,
+    backend: str = "nccl",
     output_dir: str = "results/distributed_benchmark",
 ) -> None:
     if not torch.cuda.is_available():
         typer.echo("CUDA not available on this machine — this benchmark must run on the RTX 5080.")
         raise typer.Exit(code=1)
+
+    if backend == "nccl" and not torch.distributed.is_nccl_available():
+        typer.echo(
+            "NCCL backend unavailable on this platform (e.g. native Windows — NCCL "
+            "needs WSL2 or Linux). Falling back to backend='gloo'. VRAM and "
+            "bytes-exchanged numbers stay real; run scripts/preflight_check.py for "
+            "the full explanation."
+        )
+        backend = "gloo"
 
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
@@ -111,7 +121,9 @@ def main(
     baseline_proc.join(timeout=300)
 
     split_procs = [
-        ctx.Process(target=_split_worker, args=(r, actor_name, reward_base, "29602", rollout_steps, result_queue))
+        ctx.Process(
+            target=_split_worker, args=(r, actor_name, reward_base, "29602", rollout_steps, backend, result_queue)
+        )
         for r in range(WORLD_SIZE)
     ]
     for p in split_procs:

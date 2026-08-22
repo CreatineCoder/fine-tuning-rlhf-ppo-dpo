@@ -88,11 +88,9 @@ def main(
             batch["input_ids"].to(device),
             batch["attention_mask"].to(device),
             tokenizer,
+            reward_tokenizer,
             max_new_tokens=max_new_tokens,
         )
-        # NOTE: reward model uses its own tokenizer/vocab in the real run; a
-        # production version would re-decode + re-tokenize generated text with
-        # reward_tokenizer before scoring. Left as a TODO for the Phase 8 run.
         metrics = ppo.update(rollout_batch)
         kl_trace.append(metrics["mean_kl"])
         typer.echo(f"step={step} pg_loss={metrics['pg_loss']:.4f} value_loss={metrics['value_loss']:.4f} mean_kl={metrics['mean_kl']:.4f}")
