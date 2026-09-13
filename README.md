@@ -7,9 +7,8 @@ line, not a framework call. Built to run end-to-end on a single consumer GPU
 (RTX 5080, 16GB) with a `distilgpt2` actor and `bert-tiny` reward model.
 
 > **Status: in development.** See [PLANNING.md](PLANNING.md) for the full
-> phased plan and current progress. The headline numbers below are filled in
-> as each phase actually runs on real hardware — until then they stay as
-> placeholders, never estimated or guessed.
+> phased plan and current progress. The headline numbers below are measured
+> from the completed toy runs on an RTX 5080; they are not estimates.
 
 ---
 
@@ -28,12 +27,12 @@ unit test or a real measured number — never a guess.
 - Implemented the RLHF stack from scratch, hand-writing SFT, Bradley-Terry reward
   modeling, PPO and DPO losses instead of wrapping `trl`.
 - Built PPO with a clipped surrogate objective, GAE advantages and KL penalty,
-  converging to **[KL]** against the frozen reference model.
-- Split trainable actor-critic from frozen reference-reward across two NCCL process
-  groups, measuring **[X]%** VRAM reduction and **[Y]%** fewer bytes exchanged across
-  the group boundary vs. a single merged group.
+  ending at **0.0785** mean KL against the frozen reference model.
+- Split trainable actor-critic from frozen reference-reward across two process
+  groups, measuring **34.48%** VRAM reduction and **0%** bytes-exchanged
+  reduction across the group boundary vs. a single merged group.
 - Ran a distilgpt2 and bert-tiny toy pipeline end-to-end on one GPU, with the
-  reward model ranking **[X]%** of held-out pairs correctly.
+  reward model ranking **41.5%** of held-out pairs correctly.
 
 ---
 
@@ -145,35 +144,35 @@ PLANNING.md       phase-by-phase plan, hardware decisions, exit criteria
 
 ## What's validated vs. what's designed
 
-| Component | Status | Verified on |
-|---|---|---|
-| Data pipeline (HH-RLHF, held-out split, 3 collate_fns) | ✅ Complete + tested | This CPU dev machine, real dataset download |
-| SFT engine (hand-written loop, AMP, grad-accum) | ✅ Complete + tested | Tiny synthetic GPT-2, CPU |
-| Bradley-Terry reward model + ranking accuracy eval | ✅ Complete + tested | Tiny synthetic BERT, CPU |
-| PPO engine (GAE, clipped surrogate, KL penalty) | ✅ Complete + tested | Tiny synthetic actor/critic, CPU |
-| DPO engine (closed-form preference loss) | ✅ Complete + tested | Tiny synthetic GPT-2, CPU |
-| Distributed topology (two process groups) | ✅ Complete + tested | 4-process `gloo`, CPU |
-| VRAM/bytes-exchanged benchmark script | ⚠️ Written, not yet run | Needs CUDA (RTX 5080) |
-| Real training runs (real `distilgpt2`/`bert-tiny`, real toy data) | ❌ Not yet run | Pending RTX 5080 |
-| Headline numbers ([KL], [X]%, [Y]%) | ❌ Placeholders | Filled in only after real runs |
+| Component                                                         | Status                 | Verified on                                                                    |
+| ----------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------ |
+| Data pipeline (HH-RLHF, held-out split, 3 collate_fns)            | ✅ Complete + tested   | This CPU dev machine, real dataset download                                    |
+| SFT engine (hand-written loop, AMP, grad-accum)                   | ✅ Complete + tested   | Tiny synthetic GPT-2, CPU                                                      |
+| Bradley-Terry reward model + ranking accuracy eval                | ✅ Complete + tested   | Tiny synthetic BERT, CPU                                                       |
+| PPO engine (GAE, clipped surrogate, KL penalty)                   | ✅ Complete + tested   | Tiny synthetic actor/critic, CPU                                               |
+| DPO engine (closed-form preference loss)                          | ✅ Complete + tested   | Tiny synthetic GPT-2, CPU                                                      |
+| Distributed topology (two process groups)                         | ✅ Complete + tested   | 4-process `gloo`, CPU                                                          |
+| VRAM/bytes-exchanged benchmark script                             | ✅ Complete + measured | RTX 5080, native Windows with Gloo fallback                                    |
+| Real training runs (real `distilgpt2`/`bert-tiny`, real toy data) | ✅ Complete            | RTX 5080                                                                       |
+| Headline numbers                                                  | ✅ Measured            | PPO KL 0.0785; reward accuracy 41.5%; VRAM reduction 34.48%; byte reduction 0% |
 
-The dev machine used to build this (a GTX 1650 with a driver too old for any
-working CUDA build of torch) is **code + correctness only** — every engine is
-written and unit-tested against tiny synthetic models on CPU, never run as a
-real training job here. Real training happens on a separate RTX 5080 machine.
-See [PLANNING.md](PLANNING.md) for the full reasoning.
+The real toy runs were completed on an RTX 5080. Native Windows uses the
+benchmark's Gloo fallback because NCCL requires Linux or WSL2. The benchmark
+reports real VRAM and byte counts, but this single-GPU setup does not support a
+wall-clock or bandwidth communication-savings claim. See
+[PLANNING.md](PLANNING.md) for the full reasoning.
 
 ### What's tested (37 tests, all passing)
 
-| File | Tests | Covers |
-|---|---|---|
-| `test_data.py` | 6 | Prompt extraction, dataset shapes, held-out disjointness/stability |
-| `test_sft.py` | 4 | Masked-loss correctness, prompt-masking, overfit-a-batch, checkpointing |
-| `test_reward.py` | 5 | Bradley-Terry loss correctness (incl. exact `log(2)` symmetric case), training, ranking eval |
-| `test_dpo.py` | 6 | DPO loss correctness (incl. exact `log(2)` case), reference-frozen check, training |
-| `test_ppo.py` | 10 | Exact GAE/KL/clip math, a caught-and-fixed GAE masking bug, rollout tokenizer regression test |
-| `test_distributed.py` | 2 | Real 4-process topology isolation, 50-step cross-group send/recv with no deadlock |
-| `test_benchmark.py` | 4 | Byte counter, VRAM measurement (honest 0.0 off-CUDA), reduction-percentage math |
+| File                  | Tests | Covers                                                                                        |
+| --------------------- | ----- | --------------------------------------------------------------------------------------------- |
+| `test_data.py`        | 6     | Prompt extraction, dataset shapes, held-out disjointness/stability                            |
+| `test_sft.py`         | 4     | Masked-loss correctness, prompt-masking, overfit-a-batch, checkpointing                       |
+| `test_reward.py`      | 5     | Bradley-Terry loss correctness (incl. exact `log(2)` symmetric case), training, ranking eval  |
+| `test_dpo.py`         | 6     | DPO loss correctness (incl. exact `log(2)` case), reference-frozen check, training            |
+| `test_ppo.py`         | 10    | Exact GAE/KL/clip math, a caught-and-fixed GAE masking bug, rollout tokenizer regression test |
+| `test_distributed.py` | 2     | Real 4-process topology isolation, 50-step cross-group send/recv with no deadlock             |
+| `test_benchmark.py`   | 4     | Byte counter, VRAM measurement (honest 0.0 off-CUDA), reduction-percentage math               |
 
 Two real bugs were caught this way before ever touching real hardware: a GAE
 masking bug that let padded positions leak into real advantages, and a
@@ -207,9 +206,9 @@ pip install -e .
 python scripts/preflight_check.py
 ```
 
-Checks CUDA visibility, NCCL backend availability (NCCL doesn't run on native
-Windows — only Linux/WSL2), a real AMP autocast+GradScaler round-trip, both
-tokenizers load (there's a known issue with `prajjwal1/bert-tiny`'s tokenizer
+Checks CUDA visibility, NCCL availability or the Gloo fallback on native
+Windows, a real AMP autocast+GradScaler round-trip, and that both tokenizers
+load (there's a known issue with `prajjwal1/bert-tiny`'s tokenizer
 on some `transformers` versions — this check reports it with the fix options),
 `sentencepiece` is importable, and `huggingface.co` is reachable. Fix anything
 it flags before continuing — it's designed to fail fast in seconds rather than
@@ -237,8 +236,8 @@ python scripts/train_reward.py --toy --epochs 1
 Trains `bert-tiny` + a scalar head with the Bradley-Terry loss on the same toy
 split, then evaluates ranking accuracy on the untouched 200-pair held-out
 split. Saves `results/reward/checkpoint.pt` and
-`results/reward/metrics.json` (contains `held_out_ranking_accuracy` — this
-becomes bullet 4's **[X]%**).
+`results/reward/metrics.json` (the completed toy run achieved **41.5%** held-out
+ranking accuracy).
 
 Key flags: `--base-model-name` (default `prajjwal1/bert-tiny`), `--toy`,
 `--epochs`, `--batch-size`, `--lr`, `--output-dir`.
@@ -254,7 +253,7 @@ python scripts/train_ppo.py --toy --steps 50 \
 Loads the SFT'd actor (+ a frozen deep-copied reference) and the trained
 reward model, runs PPO rollouts + updates. Logs the mean KL against the
 reference every step and writes the full trace to `results/ppo/metrics.json`
-— the stabilized value there becomes bullet 2's **[KL]**. Saves
+— the completed toy run ended at **0.0785** mean KL. Saves
 `results/ppo/checkpoint/{actor,critic}.pt`.
 
 Key flags: `--steps`, `--batch-size`, `--max-new-tokens`, `--lr`,
